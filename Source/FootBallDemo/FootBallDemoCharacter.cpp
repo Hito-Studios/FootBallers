@@ -10,6 +10,8 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
+#include "Kismet/GameplayStatics.h"
+#include "Physics/ImmediatePhysics/ImmediatePhysicsShared/ImmediatePhysicsCore.h"
 
 DEFINE_LOG_CATEGORY(LogTemplateCharacter);
 
@@ -52,13 +54,129 @@ AFootBallDemoCharacter::AFootBallDemoCharacter()
 
 	// Note: The skeletal mesh and anim blueprint references on the Mesh component (inherited from Character) 
 	// are set in the derived blueprint asset named ThirdPersonCharacter (to avoid direct content references in C++)
+
+	BallHoldPoint = CreateDefaultSubobject<USceneComponent>("BallHoldPoint");
+	BallHoldPoint->SetupAttachment(GetMesh());
+	BallHoldPoint->SetRelativeLocation(FVector(-10, 0, -90)); 
+	BallHoldPoint->SetRelativeRotation(FRotator::ZeroRotator);
+
+	bUseControllerRotationYaw = false;
+	GetCharacterMovement()->bOrientRotationToMovement = false;
+
+}
+
+void AFootBallDemoCharacter::KickBall(float force)
+{
+	if (!ControlledBall) return;
+
+	bDribbleMode = false;
+
+	UStaticMeshComponent* BallMesh = ControlledBall->BallMesh;
+	BallMesh->SetSimulatePhysics(true);
+
+	FVector KickDir = GetActorForwardVector();
+	BallMesh->AddImpulse(KickDir * force, NAME_None, true);
+
+	// Optionally, re-engage dribble after delay
+	GetWorldTimerManager().SetTimerForNextTick([this]()
+	{
+		if (ControlledBall)
+		{
+			ControlledBall->BallMesh->SetSimulatePhysics(false);
+			bDribbleMode = true;
+		}
+	});
 }
 
 void AFootBallDemoCharacter::BeginPlay()
 {
-	// Call the base class  
+	// Call the base class
 	Super::BeginPlay();
+	if (BallClass)
+	{
+		// Spawn the ball at the hold point
+		FActorSpawnParameters P;
+		P.Owner = this;
+		ControlledBall = GetWorld()->SpawnActor<AFootBall>(BallClass, BallHoldPoint->GetComponentTransform(), P);
+
+		UE_LOG(LogTemplateCharacter, Warning, TEXT("AFootBallDemoCharacter::BeginPlay"));
+	}
+
+
+	
+	
 }
+
+void AFootBallDemoCharacter::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	// INPUT → WORLD SPACE
+	FVector InputDir = FVector(MovementInput.Y, MovementInput.X, 0.f);
+	if (!InputDir.IsNearlyZero())
+	{
+		InputDir.Normalize();
+	}
+
+	// ACCELERATION/DECELERATION
+	FVector TargetVel = InputDir * MaxSpeed;
+	FVector DeltaVel = (TargetVel - Velocity).GetClampedToMaxSize(Acceleration * DeltaTime);
+	Velocity += DeltaVel;
+
+	if (InputDir.IsNearlyZero())
+	{
+		FVector BrakeVel = Velocity.GetClampedToMaxSize(Braking * DeltaTime);
+		Velocity -= BrakeVel;
+	}
+
+	// MOVE CHARACTER
+	AddActorWorldOffset(Velocity * DeltaTime, true);
+
+	// ROTATE CHARACTER TO FACE MOVEMENT
+	if (!Velocity.IsNearlyZero())
+	{
+		FRotator TargetRotation = Velocity.ToOrientationRotator();
+		SetActorRotation(FMath::RInterpTo(GetActorRotation(), TargetRotation, DeltaTime, RotationSpeed));
+	}
+
+	UpdateBallFollow(DeltaTime);
+	
+
+	
+}
+
+
+void AFootBallDemoCharacter::UpdateBallFollow(float DeltaTime)
+{
+	if (!ControlledBall) return;
+
+	UStaticMeshComponent* BallMesh = ControlledBall->BallMesh;
+	if (!BallMesh) return;
+
+	FVector BallLoc = ControlledBall->GetActorLocation();
+	FVector TargetLoc = GetActorLocation() + GetActorForwardVector() * 60.f; //Change Multuplier to Change the how far the ball should be
+	TargetLoc.Z = BallLoc.Z;
+
+	FVector ToTarget = TargetLoc - BallLoc;
+	float Distance = ToTarget.Size();
+
+	if (Distance > 2.f)
+	{
+		FVector Direction = ToTarget.GetSafeNormal();
+		float FollowStrength = FMath::Clamp(Distance * 20.f, 0.f, 900.f);
+		FVector DesiredVel = Direction * FollowStrength;
+
+		FVector CurrentVel = BallMesh->GetPhysicsLinearVelocity();
+		FVector SmoothedVel = FMath::VInterpTo(CurrentVel, DesiredVel, DeltaTime, 25.f);
+		BallMesh->SetPhysicsLinearVelocity(SmoothedVel);
+	}
+	else
+	{
+		BallMesh->SetPhysicsLinearVelocity(FVector::ZeroVector);
+	}
+	
+}
+
 
 //////////////////////////////////////////////////////////////////////////
 // Input
@@ -86,6 +204,10 @@ void AFootBallDemoCharacter::SetupPlayerInputComponent(UInputComponent* PlayerIn
 
 		// Looking
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AFootBallDemoCharacter::Look);
+
+		EnhancedInputComponent->BindAction(Sprint, ETriggerEvent::Started, this, &AFootBallDemoCharacter::StartSprint);
+
+		EnhancedInputComponent->BindAction(Sprint, ETriggerEvent::Completed, this, &AFootBallDemoCharacter::StopSprint);
 	}
 	else
 	{
@@ -95,25 +217,8 @@ void AFootBallDemoCharacter::SetupPlayerInputComponent(UInputComponent* PlayerIn
 
 void AFootBallDemoCharacter::Move(const FInputActionValue& Value)
 {
-	// input is a Vector2D
-	FVector2D MovementVector = Value.Get<FVector2D>();
-
-	if (Controller != nullptr)
-	{
-		// find out which way is forward
-		const FRotator Rotation = Controller->GetControlRotation();
-		const FRotator YawRotation(0, Rotation.Yaw, 0);
-
-		// get forward vector
-		const FVector ForwardDirection = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
-	
-		// get right vector 
-		const FVector RightDirection = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
-
-		// add movement 
-		AddMovementInput(ForwardDirection, MovementVector.Y);
-		AddMovementInput(RightDirection, MovementVector.X);
-	}
+	FVector2D InputVec = Value.Get<FVector2D>();
+	MovementInput = InputVec;
 }
 
 void AFootBallDemoCharacter::Look(const FInputActionValue& Value)
@@ -127,4 +232,18 @@ void AFootBallDemoCharacter::Look(const FInputActionValue& Value)
 		AddControllerYawInput(LookAxisVector.X);
 		AddControllerPitchInput(LookAxisVector.Y);
 	}
+}
+
+void AFootBallDemoCharacter::StartSprint()
+{
+	bIsSprinting = true;
+
+	GetCharacterMovement()->MaxWalkSpeed = 500;
+}
+
+void AFootBallDemoCharacter::StopSprint()
+{
+	bIsSprinting = false;
+	
+	GetCharacterMovement()->MaxWalkSpeed = 300;
 }

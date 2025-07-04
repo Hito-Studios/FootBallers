@@ -17,9 +17,11 @@ public:
 
 	void KickBall(const FVector& Direction, float Force);
 
-protected:
 	UPROPERTY(VisibleAnywhere)
-	UStaticMeshComponent* Ball;
+	UStaticMeshComponent* BallMesh;
+
+
+protected:
 
 
 

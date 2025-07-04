@@ -10,20 +10,20 @@ AFootBall::AFootBall()
 	PrimaryActorTick.bCanEverTick = false;
 
 
-	Ball = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Ball"));
-	SetRootComponent(Ball);
-	Ball->SetSimulatePhysics(true);
-	Ball->SetLinearDamping(0.2f);
-	Ball->SetAngularDamping(0.5f);
-	Ball->SetCollisionProfileName(TEXT("PhysicsActor"));
+	BallMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Ball"));
+	SetRootComponent(BallMesh);
+	BallMesh->SetSimulatePhysics(true);
+	BallMesh->SetLinearDamping(0.2f);
+	BallMesh->SetAngularDamping(0.5f);
+	BallMesh->SetCollisionProfileName(TEXT("PhysicsActor"));
 
 }
 
 void AFootBall::KickBall(const FVector& Direction, float Force)
 {
-	if (Ball)
+	if (BallMesh && !Direction.IsNearlyZero())
 	{
-		Ball->AddImpulse(Direction * Force, NAME_None, true);
+		BallMesh->AddImpulse(Direction.GetSafeNormal() * Force, NAME_None, true);
 	}
 }
 
